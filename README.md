@@ -21,78 +21,130 @@ Add the following PHP code to your theme’s functions.php file or a custom plug
 
 ```
 <?php
-// Add upload field under "Profile Picture" on user profile page
-function custom_user_avatar_field( $user ) {
-    ?>
-    <h3><?php esc_html_e( 'Profile Picture', 'custom' ); ?></h3>
-    <table class="form-table">
-        <tr>
-            <th><label for="custom_user_avatar"><?php esc_html_e( 'Upload Image', 'custom' ); ?></label></th>
-            <td>
-                <?php
-                $avatar_id = get_user_meta( $user->ID, 'custom_user_avatar', true );
-                if ( $avatar_id ) {
-                    echo wp_get_attachment_image( $avatar_id, [96,96], false, [ 'style' => 'border-radius:50%;display:block;margin-bottom:10px;' ] );
-                }
-                ?>
-                <input type="file" name="custom_user_avatar" id="custom_user_avatar" /><br />
-                <span class="description"><?php esc_html_e( 'Upload a custom profile picture.', 'custom' ); ?></span>
-            </td>
-        </tr>
-    </table>
-    <?php
-}
+/**
+ * Custom User Profile Avatar (Replaces Gravatar + Works with Elementor)
+ */
+
+// === 1. Add custom avatar field ===
 add_action( 'show_user_profile', 'custom_user_avatar_field' );
 add_action( 'edit_user_profile', 'custom_user_avatar_field' );
-
-// Handle avatar upload and save attachment ID as user meta
-function custom_save_user_avatar( $user_id ) {
-    if ( ! current_user_can( 'edit_user', $user_id ) ) {
-        return;
-    }
-
-    if ( ! empty( $_FILES['custom_user_avatar']['name'] ) ) {
-        require_once ABSPATH . 'wp-admin/includes/file.php';
-        require_once ABSPATH . 'wp-admin/includes/media.php';
-        require_once ABSPATH . 'wp-admin/includes/image.php';
-
-        $attachment_id = media_handle_upload( 'custom_user_avatar', 0 );
-        if ( is_wp_error( $attachment_id ) ) {
-            // Handle upload error if needed
-            return;
-        }
-
-        update_user_meta( $user_id, 'custom_user_avatar', $attachment_id );
-    }
+function custom_user_avatar_field( $user ) {
+    $avatar_id = get_user_meta( $user->ID, 'custom_user_avatar_id', true );
+    $avatar_url = $avatar_id ? wp_get_attachment_image_url( $avatar_id, 'thumbnail' ) : '';
+    ?>
+    <div id="custom-avatar-field" style="display:none;">
+        <h3>Profile Picture</h3>
+        <table class="form-table">
+            <tr>
+                <th><label for="custom_user_avatar">Profile Image</label></th>
+                <td>
+                    <img id="custom_user_avatar_preview" src="<?php echo esc_url( $avatar_url ); ?>" style="height:70px;width:70px;border-radius:50%;background:#f0f0f0;display:block;margin-bottom:10px;">
+                    <input type="hidden" name="custom_user_avatar_id" id="custom_user_avatar" value="<?php echo esc_attr( $avatar_id ); ?>">
+                    <button type="button" class="button" id="custom_user_avatar_button">Upload / Select Image</button>
+                    <button type="button" class="button" id="custom_user_avatar_remove" style="margin-left:10px;">Remove</button>
+                    <p class="description">Upload or select an avatar for this user.</p>
+                </td>
+            </tr>
+        </table>
+    </div>
+    <?php
 }
-add_action( 'personal_options_update', 'custom_save_user_avatar' );
-add_action( 'edit_user_profile_update', 'custom_save_user_avatar' );
 
-// Override avatar output to use uploaded image if available
-function custom_get_avatar( $avatar, $id_or_email, $size, $default, $alt ) {
-    $user_id = 0;
+// === 2. Save avatar field & store URL for Elementor ===
+add_action( 'personal_options_update', 'custom_user_avatar_save' );
+add_action( 'edit_user_profile_update', 'custom_user_avatar_save' );
+function custom_user_avatar_save( $user_id ) {
+    if ( ! current_user_can( 'edit_user', $user_id ) ) return;
+    $avatar_id = intval( $_POST['custom_user_avatar_id'] );
+    update_user_meta( $user_id, 'custom_user_avatar_id', $avatar_id );
+    $url = $avatar_id ? wp_get_attachment_image_url( $avatar_id, 'thumbnail' ) : '';
+    update_user_meta( $user_id, 'profile_picture', $url ); // Elementor & others use this
+}
 
+// === 3. Enqueue scripts & reposition field ===
+add_action( 'admin_enqueue_scripts', function( $hook ) {
+    if ( in_array( $hook, ['profile.php', 'user-edit.php'] ) ) {
+        wp_enqueue_media();
+        $js = <<<JS
+jQuery(document).ready(function($){
+    // Move our field under Biographical Info
+    $('#description').closest('tr').after( $('#custom-avatar-field').show().find('table tr') );
+    // Hide the default gravatar section
+    $('h2:contains("Profile Picture")').closest('table').hide();
+    // Media uploader
+    var frame;
+    $('#custom_user_avatar_button').on('click', function(e){
+        e.preventDefault();
+        if (frame) { frame.open(); return; }
+        frame = wp.media({ title: 'Select or Upload Avatar', button: { text: 'Use this image' }, multiple: false });
+        frame.on('select', function(){
+            var attachment = frame.state().get('selection').first().toJSON();
+            $('#custom_user_avatar').val(attachment.id);
+            $('#custom_user_avatar_preview').attr('src', attachment.sizes.thumbnail.url);
+        });
+        frame.open();
+    });
+    $('#custom_user_avatar_remove').on('click', function(){
+        $('#custom_user_avatar').val('');
+        $('#custom_user_avatar_preview').attr('src', '');
+    });
+});
+JS;
+        wp_add_inline_script( 'jquery-core', $js );
+    }
+});
+
+// === 4. Override get_avatar() globally ===
+add_filter( 'get_avatar', function( $avatar, $id_or_email, $size, $default, $alt ) {
+    $user = false;
     if ( is_numeric( $id_or_email ) ) {
-        $user_id = (int) $id_or_email;
+        $user = get_user_by( 'id', absint( $id_or_email ) );
     } elseif ( is_object( $id_or_email ) && ! empty( $id_or_email->user_id ) ) {
-        $user_id = (int) $id_or_email->user_id;
-    } else {
+        $user = get_user_by( 'id', absint( $id_or_email->user_id ) );
+    } elseif ( is_email( $id_or_email ) ) {
         $user = get_user_by( 'email', $id_or_email );
-        if ( $user ) {
-            $user_id = $user->ID;
-        }
     }
-
-    if ( $user_id ) {
-        $avatar_id = get_user_meta( $user_id, 'custom_user_avatar', true );
+    if ( $user ) {
+        $avatar_id = get_user_meta( $user->ID, 'custom_user_avatar_id', true );
         if ( $avatar_id ) {
-            $avatar = wp_get_attachment_image( $avatar_id, [ $size, $size ], false, [ 'alt' => $alt, 'class' => 'avatar avatar-custom' ] );
+            return wp_get_attachment_image( $avatar_id, [$size,$size], false, [
+                'class' => 'custom-user-avatar',
+                'alt'   => esc_attr( $alt ),
+                'style' => "border-radius:50%;width:{$size}px;height:{$size}px;"
+            ]);
         }
     }
-
     return $avatar;
-}
-add_filter( 'get_avatar', 'custom_get_avatar', 10, 5 );
+}, 10, 5 );
+
+// === 5. Make Elementor & others use our avatar URL when fetching meta ===
+add_filter( 'get_the_author_meta', function( $value, $field, $user_id ) {
+    if ( in_array( $field, ['profile_picture', 'user_avatar', 'avatar'] ) ) {
+        $avatar_id = get_user_meta( $user_id, 'custom_user_avatar_id', true );
+        if ( $avatar_id ) {
+            return wp_get_attachment_image_url( $avatar_id, 'thumbnail' );
+        }
+    }
+    return $value;
+}, 10, 3 );
+// === 6. Override get_avatar_url() so Elementor uses our custom avatar URL ===
+add_filter( 'get_avatar_url', function( $url, $id_or_email, $args ) {
+    $user = false;
+    if ( is_numeric( $id_or_email ) ) {
+        $user = get_user_by( 'id', absint( $id_or_email ) );
+    } elseif ( is_object( $id_or_email ) && ! empty( $id_or_email->user_id ) ) {
+        $user = get_user_by( 'id', absint( $id_or_email->user_id ) );
+    } elseif ( is_email( $id_or_email ) ) {
+        $user = get_user_by( 'email', $id_or_email );
+    }
+    if ( $user ) {
+        $avatar_id = get_user_meta( $user->ID, 'custom_user_avatar_id', true );
+        if ( $avatar_id ) {
+            return wp_get_attachment_image_url( $avatar_id, 'thumbnail' );
+        }
+    }
+    return $url;
+}, 10, 3 );
 
 ```
 Notes
